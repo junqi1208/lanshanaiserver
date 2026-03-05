@@ -1,9 +1,10 @@
-import { BadRequestException, Body, Controller, Delete, Get, Param, Patch, Post, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import type { JwtUser } from '../common/types/request-user.type';
 import { AddMessageDto } from './dto/add-message.dto';
 import { CreateConversationDto } from './dto/create-conversation.dto';
+import { ListConversationsDto } from './dto/list-conversations.dto';
 import { UpdateConversationDto } from './dto/update-conversation.dto';
 import { ConversationsService } from './conversations.service';
 
@@ -18,8 +19,11 @@ export class ConversationsController {
   }
 
   @Get()
-  async list(@CurrentUser() user: JwtUser) {
-    return await this.convService.listForUser(user.userId);
+  async list(@CurrentUser() user: JwtUser, @Query() query: ListConversationsDto) {
+    return await this.convService.listForUserByPage(user.userId, {
+      page: query.page ?? 1,
+      pageSize: query.pageSize ?? 20,
+    });
   }
 
   @Get(':id/messages')
@@ -38,23 +42,30 @@ export class ConversationsController {
       conversationId: id,
       role: dto.role,
       content: dto.content,
+      reasoning: dto.reasoning,
     });
   }
 
   @Patch(':id')
-  async rename(
+  async update(
     @CurrentUser() user: JwtUser,
     @Param('id') id: string,
     @Body() dto: UpdateConversationDto,
   ) {
-    const title = (dto.title || '').trim();
-    if (!title) {
+    const hasTitle = dto.title !== undefined;
+    const hasPinned = dto.isPinned !== undefined;
+    if (!hasTitle && !hasPinned) {
+      throw new BadRequestException('请至少提供一个可更新字段');
+    }
+    const title = hasTitle ? (dto.title || '').trim() : undefined;
+    if (hasTitle && !title) {
       throw new BadRequestException('会话标题不能为空');
     }
-    return await this.convService.renameForUser({
+    return await this.convService.updateForUser({
       userId: user.userId,
       conversationId: id,
       title,
+      isPinned: dto.isPinned,
     });
   }
 

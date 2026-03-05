@@ -19,6 +19,9 @@ export class Conversation {
   @Column({ nullable: true })
   title?: string;
 
+  @Column({ default: false })
+  isPinned!: boolean;
+
   @ManyToOne(() => User, (u) => u.conversations, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'userId' })
   user!: User;

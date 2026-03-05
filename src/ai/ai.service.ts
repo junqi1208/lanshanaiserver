@@ -14,7 +14,18 @@ export class AiService {
     private readonly convService: ConversationsService,
   ) {}
 
-  async ask(user: JwtUser, params: { conversationId?: string; prompt: string }) {
+  private resolveModel(baseUrl: string, deepThinking?: boolean): string {
+    const normalModel =
+      this.config.get<string>('OPENAI_MODEL') ??
+      this.config.get<string>('DEEPSEEK_MODEL') ??
+      'gpt-4o-mini';
+    if (!deepThinking) return normalModel;
+    const isDeepSeek = /deepseek/i.test(baseUrl);
+    if (!isDeepSeek) return normalModel;
+    return this.config.get<string>('DEEPSEEK_REASONER_MODEL') ?? 'deepseek-reasoner';
+  }
+
+  async ask(user: JwtUser, params: { conversationId?: string; prompt: string; deepThinking?: boolean }) {
     const conversationId =
       params.conversationId ??
       (await this.convService.createForUser({
@@ -34,14 +45,11 @@ export class AiService {
       this.config.get<string>('AI_SYSTEM_PROMPT') ??
       '你是一个严谨、简洁的 AI 助手。';
 
-    const model =
-      this.config.get<string>('OPENAI_MODEL') ??
-      this.config.get<string>('DEEPSEEK_MODEL') ??
-      'gpt-4o-mini';
     const baseUrl =
       this.config.get<string>('OPENAI_BASE_URL') ??
       this.config.get<string>('DEEPSEEK_BASE_URL') ??
       'https://api.openai.com';
+    const model = this.resolveModel(baseUrl, params.deepThinking);
     const openaiApiKey =
       this.config.get<string>('OPENAI_API_KEY') ?? this.config.get<string>('AI_API_KEY');
     const deepseekApiKey =
@@ -115,11 +123,14 @@ export class AiService {
         this.config.get<string>('DEEPSEEK_BASE_URL') ?? 'https://api.deepseek.com';
       const fallbackUrl = `${fallbackBase.replace(/\/$/, '').replace(/\/v1$/, '')}/v1/chat/completions`;
       const fallbackModel =
-        this.config.get<string>('DEEPSEEK_MODEL') ?? 'deepseek-chat';
+        params.deepThinking
+          ? (this.config.get<string>('DEEPSEEK_REASONER_MODEL') ?? 'deepseek-reasoner')
+          : (this.config.get<string>('DEEPSEEK_MODEL') ?? 'deepseek-chat');
       resp = await postOnce({ url: fallbackUrl, model: fallbackModel });
     }
 
     const answer: string | undefined = resp.data?.choices?.[0]?.message?.content;
+    const reasoning: string | undefined = resp.data?.choices?.[0]?.message?.reasoning_content;
     if (!answer) throw new BadRequestException('AI 返回内容为空');
 
     await this.convService.addMessageForUser({
@@ -127,6 +138,7 @@ export class AiService {
       conversationId,
       role: 'assistant',
       content: answer,
+      reasoning: reasoning || undefined,
     });
 
     return { conversationId, answer };
@@ -218,7 +230,7 @@ export class AiService {
       .trim()
       .slice(0, 30);
 
-    const saved = await this.convService.renameForUser({
+    const saved = await this.convService.updateForUser({
       userId: user.userId,
       conversationId,
       title: normalizedTitle || firstUser.slice(0, 30),
@@ -229,7 +241,7 @@ export class AiService {
 
   async askStream(
     user: JwtUser,
-    params: { conversationId?: string; prompt: string },
+    params: { conversationId?: string; prompt: string; deepThinking?: boolean },
     res: Response,
   ) {
     const conversationId =
@@ -250,14 +262,11 @@ export class AiService {
     const systemPrompt =
       this.config.get<string>('AI_SYSTEM_PROMPT') ??
       '你是一个严谨、简洁的 AI 助手。';
-    const model =
-      this.config.get<string>('OPENAI_MODEL') ??
-      this.config.get<string>('DEEPSEEK_MODEL') ??
-      'gpt-4o-mini';
     const baseUrl =
       this.config.get<string>('OPENAI_BASE_URL') ??
       this.config.get<string>('DEEPSEEK_BASE_URL') ??
       'https://api.openai.com';
+    const model = this.resolveModel(baseUrl, params.deepThinking);
     const openaiApiKey =
       this.config.get<string>('OPENAI_API_KEY') ?? this.config.get<string>('AI_API_KEY');
     const deepseekApiKey =
@@ -297,6 +306,7 @@ export class AiService {
     res.write(`data: ${JSON.stringify({ type: 'start', conversationId })}\n\n`);
 
     let fullAnswer = '';
+    let fullReasoning = '';
     let buffer = '';
 
     try {
@@ -341,7 +351,9 @@ export class AiService {
           this.config.get<string>('DEEPSEEK_BASE_URL') ?? 'https://api.deepseek.com';
         const fallbackUrl = `${fallbackBase.replace(/\/$/, '').replace(/\/v1$/, '')}/v1/chat/completions`;
         const fallbackModel =
-          this.config.get<string>('DEEPSEEK_MODEL') ?? 'deepseek-chat';
+          params.deepThinking
+            ? (this.config.get<string>('DEEPSEEK_REASONER_MODEL') ?? 'deepseek-reasoner')
+            : (this.config.get<string>('DEEPSEEK_MODEL') ?? 'deepseek-chat');
 
         upstream = await postStreamOnce({ url: fallbackUrl, model: fallbackModel });
       }
@@ -360,14 +372,22 @@ export class AiService {
 
             try {
               const json = JSON.parse(dataStr);
-              const delta: string =
-                json?.choices?.[0]?.delta?.content ??
+              const reasoningDelta: string =
                 json?.choices?.[0]?.delta?.reasoning_content ??
+                json?.choices?.[0]?.message?.reasoning_content ??
+                '';
+              const contentDelta: string =
+                json?.choices?.[0]?.delta?.content ??
                 json?.choices?.[0]?.message?.content ??
                 '';
-              if (!delta) continue;
-              fullAnswer += delta;
-              res.write(`data: ${JSON.stringify({ type: 'delta', delta })}\n\n`);
+
+              if (reasoningDelta) {
+                fullReasoning += reasoningDelta;
+                res.write(`data: ${JSON.stringify({ type: 'reasoning', delta: reasoningDelta })}\n\n`);
+              }
+              if (!contentDelta) continue;
+              fullAnswer += contentDelta;
+              res.write(`data: ${JSON.stringify({ type: 'delta', delta: contentDelta })}\n\n`);
             } catch {
               // ignore malformed upstream chunk
             }
@@ -403,6 +423,7 @@ export class AiService {
         conversationId,
         role: 'assistant',
         content: fullAnswer,
+        reasoning: fullReasoning || undefined,
       });
 
       res.write(`data: ${JSON.stringify({ type: 'done', conversationId })}\n\n`);
@@ -416,6 +437,7 @@ export class AiService {
             conversationId,
             role: 'assistant',
             content: fullAnswer,
+            reasoning: fullReasoning || undefined,
           });
         } catch {
           // ignore persistence error in fallback path

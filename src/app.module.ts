@@ -11,6 +11,8 @@ import { AuthModule } from './auth/auth.module';
 import { ConversationsModule } from './conversations/conversations.module';
 import { AiModule } from './ai/ai.module';
 import { SeedService } from './seed/seed.service';
+import { Share } from './shares/entities/share.entity';
+import { SharesModule } from './shares/shares.module';
 
 @Module({
   imports: [
@@ -18,17 +20,25 @@ import { SeedService } from './seed/seed.service';
     TypeOrmModule.forRootAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
-      useFactory: (config: ConfigService) => ({
-        type: 'sqlite',
-        database: config.get<string>('DB_PATH') ?? 'data/app.sqlite',
-        entities: [User, Conversation, Message],
-        synchronize: true,
-      }),
+      useFactory: (config: ConfigService) => {
+        return {
+          type: 'mysql' as const,
+          host: config.get<string>('DB_HOST') ?? '127.0.0.1',
+          port: Number(config.get<string>('DB_PORT') ?? '3306'),
+          username: config.get<string>('DB_USERNAME'),
+          password: config.get<string>('DB_PASSWORD'),
+          database: config.get<string>('DB_DATABASE'),
+          charset: 'utf8mb4',
+          entities: [User, Conversation, Message, Share],
+          synchronize: (config.get<string>('DB_SYNCHRONIZE') ?? 'true') === 'true',
+        };
+      },
     }),
     UsersModule,
     AuthModule,
     ConversationsModule,
     AiModule,
+    SharesModule,
   ],
   controllers: [AppController],
   providers: [AppService, SeedService],

@@ -23,7 +23,7 @@ export class User {
   @Column({ length: 50, nullable: true })
   nickname?: string;
 
-  @Column({ type: 'text', default: 'unknown' })
+  @Column({ type: 'varchar', length: 20, default: 'unknown' })
   gender!: 'male' | 'female' | 'unknown';
 
   @Column({ type: 'text', nullable: true })
@@ -32,7 +32,7 @@ export class User {
   @Column()
   passwordHash!: string;
 
-  @Column({ type: 'text', default: 'user' })
+  @Column({ type: 'varchar', length: 20, default: 'user' })
   role!: UserRole;
 
   @OneToMany(() => Conversation, (c) => c.user)

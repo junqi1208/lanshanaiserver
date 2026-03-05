@@ -1,4 +1,4 @@
-import { IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
+import { IsBoolean, IsOptional, IsString, IsUUID, MaxLength } from 'class-validator';
 
 export class AskDto {
   @IsOptional()
@@ -8,5 +8,9 @@ export class AskDto {
   @IsString()
   @MaxLength(8000)
   prompt!: string;
+
+  @IsOptional()
+  @IsBoolean()
+  deepThinking?: boolean;
 }
 
