@@ -1,4 +1,4 @@
-import { Body, Controller, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, HttpCode, Post, Req, UseGuards } from '@nestjs/common';
 import type { Request } from 'express';
 import { UsersService } from '../users/users.service';
 import { User } from '../users/entities/user.entity';
@@ -15,6 +15,7 @@ export class AuthController {
   ) {}
 
   @Post('register')
+  @HttpCode(200)
   async register(@Body() dto: RegisterDto) {
     const user = await this.usersService.createUser({
       username: dto.username,
@@ -25,6 +26,7 @@ export class AuthController {
   }
 
   @Post('login')
+  @HttpCode(200)
   @UseGuards(LocalAuthGuard)
   async login(@Body() _dto: LoginDto, @Req() req: Request) {
     const user = req.user as User;

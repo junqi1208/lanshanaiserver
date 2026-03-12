@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Param, Post, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import type { JwtUser } from '../common/types/request-user.type';
@@ -10,6 +10,7 @@ export class SharesController {
   constructor(private readonly sharesService: SharesService) {}
 
   @Post()
+  @HttpCode(200)
   @UseGuards(JwtAuthGuard)
   async create(@CurrentUser() user: JwtUser, @Body() dto: CreateShareDto) {
     return await this.sharesService.createShare({

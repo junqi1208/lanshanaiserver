@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  HttpCode,
   Param,
   Patch,
   Post,
@@ -77,6 +78,7 @@ export class UsersController {
   }
 
   @Post()
+  @HttpCode(200)
   @UseGuards(RolesGuard)
   @Roles('admin')
   async create(@Body() dto: CreateUserDto) {

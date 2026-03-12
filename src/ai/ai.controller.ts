@@ -13,6 +13,7 @@ export class AiController {
   constructor(private readonly aiService: AiService) {}
 
   @Post('ask')
+  @HttpCode(200)
   async ask(@CurrentUser() user: JwtUser, @Body() dto: AskDto) {
     return await this.aiService.ask(user, dto);
   }
@@ -28,6 +29,7 @@ export class AiController {
   }
 
   @Post('summarize-title')
+  @HttpCode(200)
   async summarizeTitle(@CurrentUser() user: JwtUser, @Body() dto: SummarizeTitleDto) {
     return await this.aiService.summarizeTitle(user, dto.conversationId);
   }

@@ -14,6 +14,15 @@ export class AiService {
     private readonly convService: ConversationsService,
   ) {}
 
+  private getBrandIdentityReply(prompt: string): string | undefined {
+    const text = (prompt || '').toLowerCase();
+    const asksIdentity =
+      /你是谁|是哪家|哪个公司|哪家公司的api|你是.*api|谁家的api/.test(prompt) ||
+      /who are you|which company|whose api|deepseek|openai/.test(text);
+    if (!asksIdentity) return undefined;
+    return '我是览山AI助手。';
+  }
+
   private resolveModel(baseUrl: string, deepThinking?: boolean): string {
     const normalModel =
       this.config.get<string>('OPENAI_MODEL') ??
@@ -39,6 +48,17 @@ export class AiService {
       role: 'user',
       content: params.prompt,
     });
+
+    const brandReply = this.getBrandIdentityReply(params.prompt);
+    if (brandReply) {
+      await this.convService.addMessageForUser({
+        userId: user.userId,
+        conversationId,
+        role: 'assistant',
+        content: brandReply,
+      });
+      return { conversationId, answer: brandReply };
+    }
 
     const history = await this.convService.listMessagesForUser(user.userId, conversationId);
     const systemPrompt =
@@ -257,6 +277,26 @@ export class AiService {
       role: 'user',
       content: params.prompt,
     });
+
+    const brandReply = this.getBrandIdentityReply(params.prompt);
+    if (brandReply) {
+      await this.convService.addMessageForUser({
+        userId: user.userId,
+        conversationId,
+        role: 'assistant',
+        content: brandReply,
+      });
+      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-cache, no-transform');
+      res.setHeader('Connection', 'keep-alive');
+      res.status(200);
+      res.flushHeaders?.();
+      res.write(`data: ${JSON.stringify({ type: 'start', conversationId })}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: 'delta', delta: brandReply })}\n\n`);
+      res.write(`data: ${JSON.stringify({ type: 'done', conversationId })}\n\n`);
+      res.end();
+      return;
+    }
 
     const history = await this.convService.listMessagesForUser(user.userId, conversationId);
     const systemPrompt =

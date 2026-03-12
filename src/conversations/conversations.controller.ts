@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Delete, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, HttpCode, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import type { JwtUser } from '../common/types/request-user.type';
@@ -14,6 +14,7 @@ export class ConversationsController {
   constructor(private readonly convService: ConversationsService) {}
 
   @Post()
+  @HttpCode(200)
   async create(@CurrentUser() user: JwtUser, @Body() dto: CreateConversationDto) {
     return await this.convService.createForUser({ userId: user.userId, title: dto.title });
   }
@@ -32,6 +33,7 @@ export class ConversationsController {
   }
 
   @Post(':id/messages')
+  @HttpCode(200)
   async addMessage(
     @CurrentUser() user: JwtUser,
     @Param('id') id: string,
