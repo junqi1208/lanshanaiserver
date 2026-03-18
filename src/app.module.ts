@@ -30,6 +30,12 @@ const envFilePath = nodeEnv === 'production' ? '.env.production' : '.env.develop
         const dbType = (config.get<string>('DB_TYPE') ?? 'mysql').toLowerCase();
         const synchronize = (config.get<string>('DB_SYNCHRONIZE') ?? 'true') === 'true';
 
+        if (nodeEnv === 'production' && dbType === 'sqlite') {
+          throw new Error(
+            'Production 环境不允许使用 sqlite，请设置 DB_TYPE=mysql 并填写 MySQL 连接参数。',
+          );
+        }
+
         if (dbType === 'sqlite') {
           return {
             type: 'sqlite' as const,
