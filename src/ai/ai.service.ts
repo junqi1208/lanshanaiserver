@@ -14,15 +14,6 @@ export class AiService {
     private readonly convService: ConversationsService,
   ) {}
 
-  private getBrandIdentityReply(prompt: string): string | undefined {
-    const text = (prompt || '').toLowerCase();
-    const asksIdentity =
-      /你是谁|是哪家|哪个公司|哪家公司的api|你是.*api|谁家的api/.test(prompt) ||
-      /who are you|which company|whose api|deepseek|openai/.test(text);
-    if (!asksIdentity) return undefined;
-    return '我是览山AI助手。';
-  }
-
   private resolveModel(baseUrl: string, deepThinking?: boolean): string {
     const normalModel =
       this.config.get<string>('OPENAI_MODEL') ??
@@ -32,6 +23,14 @@ export class AiService {
     const isDeepSeek = /deepseek/i.test(baseUrl);
     if (!isDeepSeek) return normalModel;
     return this.config.get<string>('DEEPSEEK_REASONER_MODEL') ?? 'deepseek-reasoner';
+  }
+
+  private getLangchainBaseUrl() {
+    return this.config.get<string>('LANGCHAIN_SERVER_BASE_URL') ?? 'http://127.0.0.1:8000';
+  }
+
+  private getLangchainTimeoutMs() {
+    return Number(this.config.get<string>('LANGCHAIN_SERVER_TIMEOUT_MS') ?? '120000');
   }
 
   async ask(user: JwtUser, params: { conversationId?: string; prompt: string; deepThinking?: boolean }) {
@@ -49,108 +48,30 @@ export class AiService {
       content: params.prompt,
     });
 
-    const brandReply = this.getBrandIdentityReply(params.prompt);
-    if (brandReply) {
-      await this.convService.addMessageForUser({
-        userId: user.userId,
-        conversationId,
-        role: 'assistant',
-        content: brandReply,
-      });
-      return { conversationId, answer: brandReply };
-    }
-
     const history = await this.convService.listMessagesForUser(user.userId, conversationId);
-    const systemPrompt =
-      this.config.get<string>('AI_SYSTEM_PROMPT') ??
-      '你是一个严谨、简洁的 AI 助手。';
-
-    const baseUrl =
-      this.config.get<string>('OPENAI_BASE_URL') ??
-      this.config.get<string>('DEEPSEEK_BASE_URL') ??
-      'https://api.openai.com';
-    const model = this.resolveModel(baseUrl, params.deepThinking);
-    const openaiApiKey =
-      this.config.get<string>('OPENAI_API_KEY') ?? this.config.get<string>('AI_API_KEY');
-    const deepseekApiKey =
-      this.config.get<string>('DEEPSEEK_API_KEY') ?? this.config.get<string>('AI_API_KEY');
-
-    const getApiKeyForUpstream = (upstreamUrl: string) => {
-      const isDeepSeek = /deepseek/i.test(upstreamUrl);
-      const picked = isDeepSeek
-        ? (deepseekApiKey ?? openaiApiKey)
-        : (openaiApiKey ?? deepseekApiKey);
-      if (!picked) {
-        throw new BadRequestException(
-          isDeepSeek
-            ? '未配置 DEEPSEEK_API_KEY（或 OPENAI_API_KEY / AI_API_KEY）'
-            : '未配置 OPENAI_API_KEY（或 DEEPSEEK_API_KEY / AI_API_KEY）',
-        );
-      }
-      return picked;
-    };
-
-    const base = baseUrl.replace(/\/$/, '').replace(/\/v1$/, '');
-    const url = `${base}/v1/chat/completions`;
-    const messages: OpenAIChatMessage[] = [
-      { role: 'system', content: systemPrompt },
-      ...history.map((m) => ({ role: m.role, content: m.content })),
-    ];
-
-    const temperature = Number(this.config.get<string>('OPENAI_TEMPERATURE') ?? '0.7');
-    const timeoutMs = Number(this.config.get<string>('OPENAI_TIMEOUT_MS') ?? '60000');
-
-    const postOnce = async (params: { url: string; model: string }) => {
-      return await axios.post(
-        params.url,
-        {
-          model: params.model,
-          messages,
-          temperature,
-        },
-        {
-          headers: {
-            Authorization: `Bearer ${getApiKeyForUpstream(params.url)}`,
-            'Content-Type': 'application/json',
-          },
-          timeout: timeoutMs,
-        },
-      );
-    };
-
-    let resp;
+    const url = `${this.getLangchainBaseUrl().replace(/\/$/, '')}/chat`;
+    const timeoutMs = this.getLangchainTimeoutMs();
+    let answer: string | undefined;
+    let reasoning: string | undefined;
     try {
-      resp = await postOnce({ url, model });
+      const resp = await axios.post(
+        url,
+        {
+          conversationId,
+          prompt: params.prompt,
+          deepThinking: !!params.deepThinking,
+          userId: user.userId,
+          messages: history.map((m) => ({ role: m.role, content: m.content })),
+        },
+        { timeout: timeoutMs },
+      );
+      answer = resp.data?.answer;
+      reasoning = resp.data?.reasoning;
     } catch (e: any) {
-      const isTimeout =
-        (axios.isAxiosError(e) && e.code === 'ECONNABORTED') ||
-        String(e?.message || '').toLowerCase().includes('timeout');
-
-      const canFallback =
-        isTimeout &&
-        base.includes('api.openai.com') &&
-        !this.config.get<string>('OPENAI_BASE_URL');
-
-      if (!canFallback) {
-        const msg =
-          e?.response?.data?.error?.message ||
-          e?.response?.data?.message ||
-          (isTimeout ? 'AI 请求超时' : 'AI 请求失败');
-        throw new BadRequestException(msg);
-      }
-
-      const fallbackBase =
-        this.config.get<string>('DEEPSEEK_BASE_URL') ?? 'https://api.deepseek.com';
-      const fallbackUrl = `${fallbackBase.replace(/\/$/, '').replace(/\/v1$/, '')}/v1/chat/completions`;
-      const fallbackModel =
-        params.deepThinking
-          ? (this.config.get<string>('DEEPSEEK_REASONER_MODEL') ?? 'deepseek-reasoner')
-          : (this.config.get<string>('DEEPSEEK_MODEL') ?? 'deepseek-chat');
-      resp = await postOnce({ url: fallbackUrl, model: fallbackModel });
+      const msg = e?.response?.data?.detail || e?.response?.data?.message || e?.message || 'AI 请求失败';
+      throw new BadRequestException(msg);
     }
 
-    const answer: string | undefined = resp.data?.choices?.[0]?.message?.content;
-    const reasoning: string | undefined = resp.data?.choices?.[0]?.message?.reasoning_content;
     if (!answer) throw new BadRequestException('AI 返回内容为空');
 
     await this.convService.addMessageForUser({
@@ -278,65 +199,9 @@ export class AiService {
       content: params.prompt,
     });
 
-    const brandReply = this.getBrandIdentityReply(params.prompt);
-    if (brandReply) {
-      await this.convService.addMessageForUser({
-        userId: user.userId,
-        conversationId,
-        role: 'assistant',
-        content: brandReply,
-      });
-      res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
-      res.setHeader('Cache-Control', 'no-cache, no-transform');
-      res.setHeader('Connection', 'keep-alive');
-      res.status(200);
-      res.flushHeaders?.();
-      res.write(`data: ${JSON.stringify({ type: 'start', conversationId })}\n\n`);
-      res.write(`data: ${JSON.stringify({ type: 'delta', delta: brandReply })}\n\n`);
-      res.write(`data: ${JSON.stringify({ type: 'done', conversationId })}\n\n`);
-      res.end();
-      return;
-    }
-
     const history = await this.convService.listMessagesForUser(user.userId, conversationId);
-    const systemPrompt =
-      this.config.get<string>('AI_SYSTEM_PROMPT') ??
-      '你是一个严谨、简洁的 AI 助手。';
-    const baseUrl =
-      this.config.get<string>('OPENAI_BASE_URL') ??
-      this.config.get<string>('DEEPSEEK_BASE_URL') ??
-      'https://api.openai.com';
-    const model = this.resolveModel(baseUrl, params.deepThinking);
-    const openaiApiKey =
-      this.config.get<string>('OPENAI_API_KEY') ?? this.config.get<string>('AI_API_KEY');
-    const deepseekApiKey =
-      this.config.get<string>('DEEPSEEK_API_KEY') ?? this.config.get<string>('AI_API_KEY');
-
-    const getApiKeyForUpstream = (upstreamUrl: string) => {
-      const isDeepSeek = /deepseek/i.test(upstreamUrl);
-      const picked = isDeepSeek
-        ? (deepseekApiKey ?? openaiApiKey)
-        : (openaiApiKey ?? deepseekApiKey);
-      if (!picked) {
-        throw new BadRequestException(
-          isDeepSeek
-            ? '未配置 DEEPSEEK_API_KEY（或 OPENAI_API_KEY / AI_API_KEY）'
-            : '未配置 OPENAI_API_KEY（或 DEEPSEEK_API_KEY / AI_API_KEY）',
-        );
-      }
-      return picked;
-    };
-
-    const base = baseUrl.replace(/\/$/, '').replace(/\/v1$/, '');
-    const url = `${base}/v1/chat/completions`;
-    const messages: OpenAIChatMessage[] = [
-      { role: 'system', content: systemPrompt },
-      ...history.map((m) => ({ role: m.role, content: m.content })),
-    ];
-    const temperature = Number(this.config.get<string>('OPENAI_TEMPERATURE') ?? '0.7');
-    const streamTimeoutMs = Number(
-      this.config.get<string>('OPENAI_STREAM_TIMEOUT_MS') ?? '180000',
-    );
+    const url = `${this.getLangchainBaseUrl().replace(/\/$/, '')}/chat/stream`;
+    const streamTimeoutMs = this.getLangchainTimeoutMs();
 
     res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
     res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -350,53 +215,20 @@ export class AiService {
     let buffer = '';
 
     try {
-      const postStreamOnce = async (params: { url: string; model: string }) => {
-        return await axios.post(
-          params.url,
-          {
-            model: params.model,
-            messages,
-            temperature,
-            stream: true,
-          },
-          {
-            headers: {
-              Authorization: `Bearer ${getApiKeyForUpstream(params.url)}`,
-              'Content-Type': 'application/json',
-            },
-            timeout: streamTimeoutMs,
-            responseType: 'stream',
-          },
-        );
-      };
-
-      let upstream;
-      try {
-        upstream = await postStreamOnce({ url, model });
-      } catch (e: any) {
-        const isTimeout =
-          (axios.isAxiosError(e) && e.code === 'ECONNABORTED') ||
-          String(e?.message || '').toLowerCase().includes('timeout');
-
-        const canFallback =
-          isTimeout &&
-          base.includes('api.openai.com') &&
-          !this.config.get<string>('OPENAI_BASE_URL');
-
-        if (!canFallback) {
-          throw e;
-        }
-
-        const fallbackBase =
-          this.config.get<string>('DEEPSEEK_BASE_URL') ?? 'https://api.deepseek.com';
-        const fallbackUrl = `${fallbackBase.replace(/\/$/, '').replace(/\/v1$/, '')}/v1/chat/completions`;
-        const fallbackModel =
-          params.deepThinking
-            ? (this.config.get<string>('DEEPSEEK_REASONER_MODEL') ?? 'deepseek-reasoner')
-            : (this.config.get<string>('DEEPSEEK_MODEL') ?? 'deepseek-chat');
-
-        upstream = await postStreamOnce({ url: fallbackUrl, model: fallbackModel });
-      }
+      const upstream = await axios.post(
+        url,
+        {
+          conversationId,
+          prompt: params.prompt,
+          deepThinking: !!params.deepThinking,
+          userId: user.userId,
+          messages: history.map((m) => ({ role: m.role, content: m.content })),
+        },
+        {
+          timeout: streamTimeoutMs,
+          responseType: 'stream',
+        },
+      );
 
       await new Promise<void>((resolve, reject) => {
         upstream.data.on('data', (chunk: Buffer) => {
@@ -412,13 +244,24 @@ export class AiService {
 
             try {
               const json = JSON.parse(dataStr);
+              const eventType = json?.type;
+              if (eventType === 'start') continue;
+              if (eventType === 'error') {
+                const message = json?.message || 'AI 流式请求失败';
+                res.write(`data: ${JSON.stringify({ type: 'error', message })}\n\n`);
+                continue;
+              }
+              if (eventType === 'done') {
+                continue;
+              }
               const reasoningDelta: string =
-                json?.choices?.[0]?.delta?.reasoning_content ??
-                json?.choices?.[0]?.message?.reasoning_content ??
+                json?.delta?.reasoning_content ??
+                json?.reasoning ??
+                json?.reasoning_content ??
                 '';
               const contentDelta: string =
-                json?.choices?.[0]?.delta?.content ??
-                json?.choices?.[0]?.message?.content ??
+                json?.delta ??
+                json?.content ??
                 '';
 
               if (reasoningDelta) {
@@ -442,8 +285,8 @@ export class AiService {
         try {
           const fallback = JSON.parse(buffer.trim());
           const fallbackText: string =
-            fallback?.choices?.[0]?.message?.content ??
-            fallback?.choices?.[0]?.delta?.content ??
+            fallback?.delta ??
+            fallback?.content ??
             '';
           if (fallbackText) {
             fullAnswer = fallbackText;
