@@ -1,4 +1,4 @@
-import { BadRequestException, Body, Controller, Delete, Get, HttpCode, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import { BadRequestException, Body, Controller, Delete, Get, HttpCode, Param, ParseUUIDPipe, Patch, Post, Query, UseGuards } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../common/decorators/current-user.decorator';
 import type { JwtUser } from '../common/types/request-user.type';
@@ -28,7 +28,7 @@ export class ConversationsController {
   }
 
   @Get(':id/messages')
-  async messages(@CurrentUser() user: JwtUser, @Param('id') id: string) {
+  async messages(@CurrentUser() user: JwtUser, @Param('id', ParseUUIDPipe) id: string) {
     return await this.convService.listMessagesForUser(user.userId, id);
   }
 
@@ -36,9 +36,12 @@ export class ConversationsController {
   @HttpCode(200)
   async addMessage(
     @CurrentUser() user: JwtUser,
-    @Param('id') id: string,
+    @Param('id', ParseUUIDPipe) id: string,
     @Body() dto: AddMessageDto,
   ) {
+    if (dto.role !== 'assistant') {
+      throw new BadRequestException('仅支持保存助手消息');
+    }
     return await this.convService.addMessageForUser({
       userId: user.userId,
       conversationId: id,

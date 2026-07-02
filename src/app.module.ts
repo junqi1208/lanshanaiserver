@@ -13,6 +13,8 @@ import { AiModule } from './ai/ai.module';
 import { SeedService } from './seed/seed.service';
 import { Share } from './shares/entities/share.entity';
 import { SharesModule } from './shares/shares.module';
+import { UploadedFile } from './files/entities/file.entity';
+import { FilesModule } from './files/files.module';
 
 const nodeEnv = process.env.NODE_ENV ?? 'development';
 const envFilePath = nodeEnv === 'production' ? '.env.production' : '.env.development';
@@ -40,7 +42,7 @@ const envFilePath = nodeEnv === 'production' ? '.env.production' : '.env.develop
           return {
             type: 'sqlite' as const,
             database: config.get<string>('DB_SQLITE_PATH') ?? 'dev.sqlite',
-            entities: [User, Conversation, Message, Share],
+            entities: [User, Conversation, Message, Share, UploadedFile],
             synchronize,
           };
         }
@@ -53,8 +55,11 @@ const envFilePath = nodeEnv === 'production' ? '.env.production' : '.env.develop
           password: config.get<string>('DB_PASSWORD'),
           database: config.get<string>('DB_DATABASE'),
           charset: 'utf8mb4',
-          entities: [User, Conversation, Message, Share],
-          synchronize,
+          entities: [User, Conversation, Message, Share, UploadedFile],
+          synchronize:
+            nodeEnv === 'production'
+              ? (config.get<string>('DB_SYNCHRONIZE') ?? 'false') === 'true'
+              : synchronize,
         };
       },
     }),
@@ -63,6 +68,7 @@ const envFilePath = nodeEnv === 'production' ? '.env.production' : '.env.develop
     ConversationsModule,
     AiModule,
     SharesModule,
+    FilesModule,
   ],
   controllers: [AppController],
   providers: [AppService, SeedService],

@@ -3,15 +3,21 @@ import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import type { Response } from 'express';
 import { ConversationsService } from '../conversations/conversations.service';
+import { FilesService } from '../files/files.service';
 import type { JwtUser } from '../common/types/request-user.type';
+import { modelSupportsImage } from './dto/ask.dto';
 
 type OpenAIChatMessage = { role: 'system' | 'user' | 'assistant'; content: string };
+
+const MAX_HISTORY_MESSAGES = 40;
+const MAX_ENRICHED_PROMPT_CHARS = 32000;
 
 @Injectable()
 export class AiService {
   constructor(
     private readonly config: ConfigService,
     private readonly convService: ConversationsService,
+    private readonly filesService: FilesService,
   ) {}
 
   private resolveModel(baseUrl: string, deepThinking?: boolean): string {
@@ -33,7 +39,109 @@ export class AiService {
     return Number(this.config.get<string>('LANGCHAIN_SERVER_TIMEOUT_MS') ?? '120000');
   }
 
-  async ask(user: JwtUser, params: { conversationId?: string; prompt: string; deepThinking?: boolean }) {
+  private getLangchainHeaders(): Record<string, string> {
+    const apiKey = (this.config.get<string>('LANGCHAIN_SERVER_API_KEY') ?? '').trim();
+    return apiKey ? { 'X-Internal-Api-Key': apiKey } : {};
+  }
+
+  private trimEnrichedPrompt(prompt: string): string {
+    if (prompt.length <= MAX_ENRICHED_PROMPT_CHARS) return prompt;
+    return `${prompt.slice(0, MAX_ENRICHED_PROMPT_CHARS)}\n\n【提示：附件内容过长，已截断】`;
+  }
+
+  private mapHistoryMessages(
+    messages: Array<{ role: string; content: string }>,
+  ): OpenAIChatMessage[] {
+    return messages.map((m) => ({
+      role: m.role as OpenAIChatMessage['role'],
+      content: m.content,
+    }));
+  }
+
+  private async rollbackFailedTurn(
+    user: JwtUser,
+    conversationId: string,
+    userMessageId: string,
+    isNewConversation: boolean,
+  ) {
+    try {
+      await this.convService.removeMessageForUser(user.userId, conversationId, userMessageId);
+    } catch {
+      // ignore rollback failure
+    }
+    if (isNewConversation) {
+      try {
+        await this.convService.removeConversationIfEmpty(user.userId, conversationId);
+      } catch {
+        // ignore cleanup failure
+      }
+    }
+  }
+
+  private async buildPromptWithAttachments(
+    user: JwtUser,
+    prompt: string,
+    fileIds?: string[],
+  ): Promise<string> {
+    if (!fileIds?.length) return prompt;
+
+    const attachments = await this.filesService.getTextsForUser(user.userId, fileIds);
+    if (!attachments.length) return prompt;
+
+    const attachmentBlocks = attachments.map(
+      (item) => `--- 文件：${item.originalName} ---\n${item.text}`,
+    );
+
+    return [
+      prompt,
+      '',
+      '【用户上传的附件内容，请结合以下内容回答】',
+      ...attachmentBlocks,
+    ].join('\n');
+  }
+
+  private async buildAttachmentsPayload(
+    user: JwtUser,
+    fileIds?: string[],
+  ): Promise<string | undefined> {
+    if (!fileIds?.length) return undefined;
+    const metas = await this.filesService.getMetasForUser(user.userId, fileIds);
+    return metas.length ? JSON.stringify(metas) : undefined;
+  }
+
+  private async buildImagesPayload(user: JwtUser, fileIds?: string[]) {
+    if (!fileIds?.length) return [];
+    const images = await this.filesService.getImagesForUser(user.userId, fileIds);
+    return images.map((item) => ({
+      mimeType: item.mimeType,
+      base64: item.base64,
+    }));
+  }
+
+  private async validateAttachmentsForModel(
+    user: JwtUser,
+    fileIds: string[] | undefined,
+    modelId?: string,
+  ) {
+    if (!fileIds?.length) return;
+    const images = await this.filesService.getImagesForUser(user.userId, fileIds);
+    if (images.length && !modelSupportsImage(modelId)) {
+      throw new BadRequestException('当前模型不支持图片识别，请切换到 Qwen VL Max');
+    }
+  }
+
+  async ask(
+    user: JwtUser,
+    params: {
+      conversationId?: string;
+      prompt: string;
+      deepThinking?: boolean;
+      fileIds?: string[];
+      replyStyle?: string;
+      modelId?: string;
+    },
+  ) {
+    const isNewConversation = !params.conversationId;
     const conversationId =
       params.conversationId ??
       (await this.convService.createForUser({
@@ -41,14 +149,29 @@ export class AiService {
         title: params.prompt.slice(0, 30),
       })).id;
 
-    await this.convService.addMessageForUser({
+    const modelId = params.modelId || 'deepseek-v4-flash';
+    const deepThinking = params.deepThinking ?? modelId === 'deepseek-v4-pro';
+
+    await this.validateAttachmentsForModel(user, params.fileIds, modelId);
+
+    const priorHistory = await this.convService.listRecentMessagesForUser(
+      user.userId,
+      conversationId,
+      MAX_HISTORY_MESSAGES,
+    );
+    const enrichedPrompt = this.trimEnrichedPrompt(
+      await this.buildPromptWithAttachments(user, params.prompt, params.fileIds),
+    );
+    const images = await this.buildImagesPayload(user, params.fileIds);
+
+    const userMessage = await this.convService.addMessageForUser({
       userId: user.userId,
       conversationId,
       role: 'user',
       content: params.prompt,
+      attachments: await this.buildAttachmentsPayload(user, params.fileIds),
     });
 
-    const history = await this.convService.listMessagesForUser(user.userId, conversationId);
     const url = `${this.getLangchainBaseUrl().replace(/\/$/, '')}/chat`;
     const timeoutMs = this.getLangchainTimeoutMs();
     let answer: string | undefined;
@@ -58,21 +181,28 @@ export class AiService {
         url,
         {
           conversationId,
-          prompt: params.prompt,
-          deepThinking: !!params.deepThinking,
+          prompt: enrichedPrompt,
+          deepThinking,
+          replyStyle: params.replyStyle,
+          modelId,
+          images,
           userId: user.userId,
-          messages: history.map((m) => ({ role: m.role, content: m.content })),
+          messages: this.mapHistoryMessages(priorHistory),
         },
-        { timeout: timeoutMs },
+        { timeout: timeoutMs, headers: this.getLangchainHeaders() },
       );
       answer = resp.data?.answer;
       reasoning = resp.data?.reasoning;
     } catch (e: any) {
+      await this.rollbackFailedTurn(user, conversationId, userMessage.id, isNewConversation);
       const msg = e?.response?.data?.detail || e?.response?.data?.message || e?.message || 'AI 请求失败';
       throw new BadRequestException(msg);
     }
 
-    if (!answer) throw new BadRequestException('AI 返回内容为空');
+    if (!answer) {
+      await this.rollbackFailedTurn(user, conversationId, userMessage.id, isNewConversation);
+      throw new BadRequestException('AI 返回内容为空');
+    }
 
     await this.convService.addMessageForUser({
       userId: user.userId,
@@ -182,9 +312,17 @@ export class AiService {
 
   async askStream(
     user: JwtUser,
-    params: { conversationId?: string; prompt: string; deepThinking?: boolean },
+    params: {
+      conversationId?: string;
+      prompt: string;
+      deepThinking?: boolean;
+      fileIds?: string[];
+      replyStyle?: string;
+      modelId?: string;
+    },
     res: Response,
   ) {
+    const isNewConversation = !params.conversationId;
     const conversationId =
       params.conversationId ??
       (await this.convService.createForUser({
@@ -192,14 +330,29 @@ export class AiService {
         title: params.prompt.slice(0, 30),
       })).id;
 
-    await this.convService.addMessageForUser({
+    const modelId = params.modelId || 'deepseek-v4-flash';
+    const deepThinking = params.deepThinking ?? modelId === 'deepseek-v4-pro';
+
+    await this.validateAttachmentsForModel(user, params.fileIds, modelId);
+
+    const priorHistory = await this.convService.listRecentMessagesForUser(
+      user.userId,
+      conversationId,
+      MAX_HISTORY_MESSAGES,
+    );
+    const enrichedPrompt = this.trimEnrichedPrompt(
+      await this.buildPromptWithAttachments(user, params.prompt, params.fileIds),
+    );
+    const images = await this.buildImagesPayload(user, params.fileIds);
+
+    const userMessage = await this.convService.addMessageForUser({
       userId: user.userId,
       conversationId,
       role: 'user',
       content: params.prompt,
+      attachments: await this.buildAttachmentsPayload(user, params.fileIds),
     });
 
-    const history = await this.convService.listMessagesForUser(user.userId, conversationId);
     const url = `${this.getLangchainBaseUrl().replace(/\/$/, '')}/chat/stream`;
     const streamTimeoutMs = this.getLangchainTimeoutMs();
 
@@ -213,20 +366,27 @@ export class AiService {
     let fullAnswer = '';
     let fullReasoning = '';
     let buffer = '';
+    let upstreamFailed = false;
+    let upstreamErrorMsg = '';
+    let assistantSaved = false;
 
     try {
       const upstream = await axios.post(
         url,
         {
           conversationId,
-          prompt: params.prompt,
-          deepThinking: !!params.deepThinking,
+          prompt: enrichedPrompt,
+          deepThinking,
+          replyStyle: params.replyStyle,
+          modelId,
+          images,
           userId: user.userId,
-          messages: history.map((m) => ({ role: m.role, content: m.content })),
+          messages: this.mapHistoryMessages(priorHistory),
         },
         {
           timeout: streamTimeoutMs,
           responseType: 'stream',
+          headers: this.getLangchainHeaders(),
         },
       );
 
@@ -247,8 +407,9 @@ export class AiService {
               const eventType = json?.type;
               if (eventType === 'start') continue;
               if (eventType === 'error') {
-                const message = json?.message || 'AI 流式请求失败';
-                res.write(`data: ${JSON.stringify({ type: 'error', message })}\n\n`);
+                upstreamFailed = true;
+                upstreamErrorMsg = json?.message || 'AI 流式请求失败';
+                res.write(`data: ${JSON.stringify({ type: 'error', message: upstreamErrorMsg })}\n\n`);
                 continue;
               }
               if (eventType === 'done') {
@@ -297,7 +458,13 @@ export class AiService {
         }
       }
 
+      if (upstreamFailed && !fullAnswer.trim()) {
+        await this.rollbackFailedTurn(user, conversationId, userMessage.id, isNewConversation);
+        throw new BadRequestException(upstreamErrorMsg || 'AI 流式请求失败');
+      }
+
       if (!fullAnswer.trim()) {
+        await this.rollbackFailedTurn(user, conversationId, userMessage.id, isNewConversation);
         throw new BadRequestException('AI 返回内容为空或流格式不兼容');
       }
 
@@ -308,12 +475,12 @@ export class AiService {
         content: fullAnswer,
         reasoning: fullReasoning || undefined,
       });
+      assistantSaved = true;
 
       res.write(`data: ${JSON.stringify({ type: 'done', conversationId })}\n\n`);
       res.end();
     } catch (e: any) {
-      // 如果流式过程中已产生部分回答（例如用户点击暂停），也要落库保存到历史会话
-      if (fullAnswer.trim()) {
+      if (fullAnswer.trim() && !assistantSaved) {
         try {
           await this.convService.addMessageForUser({
             userId: user.userId,
@@ -322,9 +489,12 @@ export class AiService {
             content: fullAnswer,
             reasoning: fullReasoning || undefined,
           });
+          assistantSaved = true;
         } catch {
           // ignore persistence error in fallback path
         }
+      } else if (!fullAnswer.trim()) {
+        await this.rollbackFailedTurn(user, conversationId, userMessage.id, isNewConversation);
       }
 
       const msg =

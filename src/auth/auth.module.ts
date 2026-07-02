@@ -15,10 +15,17 @@ import { LocalStrategy } from './strategies/local.strategy';
     JwtModule.registerAsync({
       imports: [ConfigModule],
       inject: [ConfigService],
-      useFactory: (config: ConfigService) => ({
-        secret: config.get<string>('JWT_SECRET') ?? 'dev_jwt_secret',
-        signOptions: { expiresIn: config.get<string>('JWT_EXPIRES_IN') ?? '7d' },
-      }),
+      useFactory: (config: ConfigService) => {
+        const nodeEnv = config.get<string>('NODE_ENV') ?? 'development';
+        const secret = config.get<string>('JWT_SECRET');
+        if (nodeEnv === 'production' && !secret) {
+          throw new Error('Production 环境必须配置 JWT_SECRET');
+        }
+        return {
+          secret: secret ?? 'dev_jwt_secret',
+          signOptions: { expiresIn: config.get<string>('JWT_EXPIRES_IN') ?? '7d' },
+        };
+      },
     }),
   ],
   controllers: [AuthController],

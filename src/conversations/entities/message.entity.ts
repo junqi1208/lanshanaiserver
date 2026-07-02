@@ -24,6 +24,9 @@ export class Message {
   @Column({ type: 'text', nullable: true })
   reasoning?: string;
 
+  @Column({ type: 'text', nullable: true })
+  attachments?: string;
+
   @ManyToOne(() => Conversation, (c) => c.messages, { onDelete: 'CASCADE' })
   @JoinColumn({ name: 'conversationId' })
   conversation!: Conversation;

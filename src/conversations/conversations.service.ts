@@ -67,12 +67,40 @@ export class ConversationsService {
     });
   }
 
+  async listRecentMessagesForUser(
+    userId: string,
+    conversationId: string,
+    limit = 40,
+  ): Promise<Message[]> {
+    await this.getForUser(userId, conversationId);
+    const safeLimit = Math.min(100, Math.max(1, limit));
+    const rows = await this.msgRepo.find({
+      where: { conversationId },
+      order: { createdAt: 'DESC' },
+      take: safeLimit,
+    });
+    return rows.reverse();
+  }
+
+  async countMessagesForUser(userId: string, conversationId: string): Promise<number> {
+    await this.getForUser(userId, conversationId);
+    return await this.msgRepo.count({ where: { conversationId } });
+  }
+
+  async removeConversationIfEmpty(userId: string, conversationId: string): Promise<void> {
+    const count = await this.countMessagesForUser(userId, conversationId);
+    if (count === 0) {
+      await this.removeForUser(userId, conversationId);
+    }
+  }
+
   async addMessageForUser(params: {
     userId: string;
     conversationId: string;
     role: MessageRole;
     content: string;
     reasoning?: string;
+    attachments?: string;
   }): Promise<Message> {
     await this.getForUser(params.userId, params.conversationId);
     const msg = this.msgRepo.create({
@@ -80,6 +108,7 @@ export class ConversationsService {
       role: params.role,
       content: params.content,
       reasoning: params.reasoning,
+      attachments: params.attachments,
     });
     const saved = await this.msgRepo.save(msg);
     await this.convRepo.update(
@@ -87,6 +116,19 @@ export class ConversationsService {
       { updatedAt: new Date() },
     );
     return saved;
+  }
+
+  async removeMessageForUser(
+    userId: string,
+    conversationId: string,
+    messageId: string,
+  ): Promise<void> {
+    await this.getForUser(userId, conversationId);
+    const msg = await this.msgRepo.findOne({
+      where: { id: messageId, conversationId },
+    });
+    if (!msg) throw new NotFoundException('消息不存在');
+    await this.msgRepo.remove(msg);
   }
 
   async updateForUser(params: {
